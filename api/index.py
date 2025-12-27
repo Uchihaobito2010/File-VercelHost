@@ -4,17 +4,19 @@ import telebot
 import time
 import threading
 import json
-import requests
 import os
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, BotCommand
-from flask import Flask, request, jsonify
+from flask import Flask, request
+
+# Create Flask app FIRST
+app = Flask(__name__)
 
 # Simple logging for Termux
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Your credentials
-BOT_TOKEN = "8508424494:AAFyHD_NaRH1xrQKMntvdoZz3wpKDOt4tlM"
+BOT_TOKEN = "8289292795:AAHqCM2yUdPWCD_ajrdoeF8uGLSYa56BP4Q"
 ADMINS = [8033743774]
 
 # Initialize bot with protect content capability
@@ -56,7 +58,8 @@ bot = SecureTeleBot(bot.token, parse_mode="HTML")
 # COMPLETE Database class for Termux
 class Database:
     def __init__(self):
-        db_path = '/tmp/file_bot.db' if os.environ.get('VERCEL') else 'file_bot.db'
+        # Use /tmp for Vercel serverless
+        db_path = '/tmp/file_bot.db'
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.create_tables()
     
@@ -423,53 +426,12 @@ def send_force_join_message(chat_id: int, user_id: int):
         logger.error(f"Welcome message error: {e}")
         return True
 
-# Auto delete function
+# Auto delete function (modified for Vercel - remove threading)
 def schedule_auto_delete(chat_id: int, message_ids: list, file_id: str):
-    auto_delete_status = db.get_setting('auto_delete', 'off')
-    
-    if auto_delete_status == 'off':
-        return
-    
-    delete_time = int(db.get_setting('auto_delete_minutes', '3')) * 60
-    
-    def delete_messages():
-        try:
-            time.sleep(delete_time)
-            
-            # Delete all sent messages
-            for msg_id in message_ids:
-                try:
-                    bot.delete_message(chat_id, msg_id)
-                except Exception as e:
-                    logger.error(f"Error deleting message {msg_id}: {e}")
-            
-            # Send get back button after deletion
-            if db.get_setting('auto_delete', 'off') == 'on':
-                bot_username = bot.get_me().username
-                share_link = f"https://t.me/{bot_username}?start={file_id}"
-                
-                keyboard = InlineKeyboardMarkup()
-                keyboard.add(InlineKeyboardButton(
-                    "🔄 GET BACK",
-                    url=share_link
-                ))
-                
-                bot.send_message(
-                    chat_id,
-                    "❌ Files were automatically deleted for security.\n\n"
-                    "🔗 Click the button below to get them back anytime:",
-                    reply_markup=keyboard
-                )
-                
-                logger.info(f"✅ GET BACK button sent for file {file_id}")
-            
-        except Exception as e:
-            logger.error(f"Auto delete error: {e}")
-    
-    # Start deletion thread
-    thread = threading.Thread(target=delete_messages)
-    thread.daemon = True
-    thread.start()
+    # In Vercel serverless, we can't use background threads
+    # Auto-delete will be skipped in serverless environment
+    logger.info(f"⚠️ Auto-delete skipped in serverless environment for file {file_id}")
+    return
 
 # Set bot commands for menu
 def set_bot_commands():
@@ -1717,56 +1679,68 @@ def process_broadcast_message(message: Message):
         logger.error(f"Broadcast process error: {e}")
         bot.reply_to(message, f"❌ Broadcast error: {str(e)}")
 
-# Flask app for Vercel
-app = Flask(__name__)
-
+# Flask routes
 @app.route('/')
 def home():
-    return "🤖 Bot is running!"
+    return "🤖 Bot is running!", 200
 
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def webhook():
     if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return 'OK', 200
+        try:
+            json_string = request.get_data().decode('utf-8')
+            update = telebot.types.Update.de_json(json_string)
+            bot.process_new_updates([update])
+            return 'OK', 200
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
+            return 'Error', 500
     return 'Bad Request', 400
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
-    # Get Vercel URL from environment
-    vercel_url = os.environ.get('VERCEL_URL', 'https://' + request.host)
-    webhook_url = vercel_url + '/' + BOT_TOKEN
-    
     try:
-        s = bot.set_webhook(url=webhook_url)
-        if s:
-            return f"✅ Webhook set: {webhook_url}", 200
+        # Get the current domain
+        host = request.headers.get('Host', '')
+        if 'vercel.app' in host:
+            webhook_url = f"https://{host}/{BOT_TOKEN}"
         else:
+            # For local testing
+            webhook_url = f"http://{host}/{BOT_TOKEN}"
+        
+        bot.remove_webhook()
+        time.sleep(1)
+        result = bot.set_webhook(url=webhook_url)
+        
+        if result:
+            logger.info(f"✅ Webhook set to: {webhook_url}")
+            return f"✅ Webhook set successfully!<br>URL: {webhook_url}", 200
+        else:
+            logger.error("❌ Failed to set webhook")
             return "❌ Failed to set webhook", 500
     except Exception as e:
+        logger.error(f"Webhook setup error: {e}")
         return f"❌ Error: {str(e)}", 500
 
 @app.route('/remove_webhook', methods=['GET'])
 def remove_webhook():
     try:
-        s = bot.remove_webhook()
-        if s:
-            return "✅ Webhook removed", 200
+        result = bot.remove_webhook()
+        if result:
+            logger.info("✅ Webhook removed")
+            return "✅ Webhook removed successfully!", 200
         else:
             return "❌ Failed to remove webhook", 500
     except Exception as e:
         return f"❌ Error: {str(e)}", 500
 
-if __name__ == "__main__":
-    logger.info("🚀 Starting BOT in Vercel...")
+# Initialize on Vercel startup
+def initialize_bot():
+    logger.info("🚀 Initializing bot for Vercel...")
     logger.info("✅ Database initialized")
     logger.info("🔒 Forward Lock system active")
     logger.info("🛡️ Protect Mode system ready")
-    logger.info("⏰ Auto Delete system ready")
     logger.info("📦 Bulk generation feature READY")
-    logger.info("🔗 All commands added to menu")
     logger.info(f"🛠️ Admins: {ADMINS}")
     
     # Set bot commands
@@ -1779,13 +1753,19 @@ if __name__ == "__main__":
         # Send startup message to admins
         for admin_id in ADMINS:
             try:
-                bot.send_message(admin_id, "🤖 Bot started successfully!\nUse /admin to access admin panel.")
+                bot.send_message(admin_id, "🤖 Bot started on Vercel!\nUse /admin to access admin panel.")
                 logger.info(f"✅ Startup message sent to admin {admin_id}")
             except Exception as e:
                 logger.error(f"❌ Cannot send message to admin {admin_id}: {e}")
         
         logger.info("🎯 Bot is ready with webhooks!")
-        # In Vercel, we don't start polling, we use Flask app
-        app.run(host='0.0.0.0', port=8080)
     except Exception as e:
-        logger.error(f"❌ Failed to start bot: {e}")
+        logger.error(f"❌ Failed to initialize bot: {e}")
+
+# Initialize when module loads
+initialize_bot()
+
+# Vercel requires this to be at module level
+if __name__ == "__main__":
+    # This won't run on Vercel, only locally
+    app.run(host='0.0.0.0', port=8080, debug=True)
